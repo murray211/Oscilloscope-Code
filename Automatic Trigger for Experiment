@@ -1,0 +1,148 @@
+import pyvisa
+rm = pyvisa.ResourceManager()
+scope = rm.open_resource('USB0::0x1AB1::0x0450::DHO5D26440025::INSTR')
+
+TRIGGER_SOURCE = "CHAN2"  #Sets the trigger to channel 2
+TRIGGER_SLOPE = "NEG"   #Sets the trigger to the falling edge
+
+TRIGGER_LEVEL = 1        # volts - adjust based on the ramp's crossing point
+
+CHANNELS_TO_CAPTURE = ["CHAN1", "CHAN2", "CHAN4"] # Telling program what channels to take data from
+
+NUM_CYCLES = 30   #change to none if infinte cycles
+MAX_RUNTIME_SEC = None      # optional wall-clock cap, e.g. 3600 for 1 hour; None = ignore
+TRIGGER_TIMEOUT_SEC = 10    # how long to wait for a single trigger before giving up
+ 
+OUTPUT_DIR = Path("./captures")
+OUTPUT_DIR.mkdir(exist_ok=True)
+ 
+# ---------------------------------------------------------------------
+ 
+ 
+def connect(resource_str):
+    rm = pyvisa.ResourceManager()
+    scope = rm.open_resource(resource_str)
+    scope.timeout = 15000  # ms, for regular SCPI calls
+    idn = scope.query("*IDN?").strip()
+    print(f"Connected: {idn}")
+    return scope
+ 
+ 
+def configure_trigger(scope):
+    scope.write(":TRIGger:MODE EDGE")
+    scope.write(f":TRIGger:EDGE:SOURce {TRIGGER_SOURCE}")
+    scope.write(f":TRIGger:EDGE:SLOPe {TRIGGER_SLOPE}")
+    scope.write(f":TRIGger:EDGE:LEVel {TRIGGER_LEVEL}")
+ 
+ 
+def arm_single_shot(scope):
+    """Arm the scope for a single triggered acquisition."""
+    scope.write(":SINGle")
+ 
+ 
+def wait_for_trigger(scope, timeout_sec):
+    """
+    Poll :TRIGger:STATus? until it reports STOP (captured) or
+    give up after timeout_sec. Returns True if triggered, False on timeout.
+    Rigol status values: TD (triggered), WAIT, RUN, AUTO, STOP
+    """
+    start = time.time()
+    while time.time() - start < timeout_sec:
+        status = scope.query(":TRIGger:STATus?").strip()
+        if status == "STOP":
+            return True
+        time.sleep(0.02)
+    return False
+ 
+ 
+def read_waveform(scope, channel):
+    """
+    Pull one channel's waveform as (time_array, voltage_array).
+    Uses BYTE format for speed; switch to WORD if you need more
+    vertical resolution and don't mind slower transfer.
+    """
+    scope.write(f":WAVeform:SOURce {channel}")
+    scope.write(":WAVeform:MODE NORMal")   # captured/displayed data; use RAW for full memory depth
+    scope.write(":WAVeform:FORMat BYTE")
+ 
+    preamble = scope.query(":WAVeform:PREamble?").strip().split(",")
+    # Preamble fields (DHO series): format,type,points,count,
+    # xincrement,xorigin,xreference,yincrement,yorigin,yreference
+    x_increment = float(preamble[4])
+    x_origin = float(preamble[5])
+    x_reference = float(preamble[6])
+    y_increment = float(preamble[7])
+    y_origin = float(preamble[8])
+    y_reference = float(preamble[9])
+ 
+    raw = scope.query_binary_values(":WAVeform:DATA?", datatype="B", container=np.array)
+ 
+    voltages = (raw.astype(np.float64) - y_reference - y_origin) * y_increment
+    times = (np.arange(len(raw)) - x_reference) * x_increment + x_origin
+ 
+    return times, voltages
+ 
+ 
+def save_cycle(cycle_index, timestamp, channel_data):
+    """
+    channel_data: dict like {"CHAN2": (t, v), "CHAN4": (t, v)}
+    Saves one CSV per cycle with columns: time, CHAN2, CHAN4
+    """
+    fname = OUTPUT_DIR / f"cycle_{cycle_index:05d}_{timestamp}.csv"
+    channels = list(channel_data.keys())
+    t_ref = channel_data[channels[0]][0]  # assume shared time base
+ 
+    with open(fname, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["time_s"] + channels)
+        for i in range(len(t_ref)):
+            row = [t_ref[i]] + [channel_data[ch][1][i] for ch in channels]
+            writer.writerow(row)
+ 
+    return fname
+ 
+ 
+def main():
+    scope = connect(VISA_RESOURCE)
+    configure_trigger(scope)
+ 
+    cycle = 0
+    start_time = time.time()
+ 
+    try:
+        while True:
+            if NUM_CYCLES is not None and cycle >= NUM_CYCLES:
+                print(f"Reached {NUM_CYCLES} cycles, stopping.")
+                break
+            if MAX_RUNTIME_SEC is not None and (time.time() - start_time) > MAX_RUNTIME_SEC:
+                print("Max runtime reached, stopping.")
+                break
+ 
+            arm_single_shot(scope)
+            triggered = wait_for_trigger(scope, TRIGGER_TIMEOUT_SEC)
+ 
+            if not triggered:
+                print(f"[cycle {cycle}] no trigger within {TRIGGER_TIMEOUT_SEC}s, skipping")
+                continue
+ 
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            channel_data = {}
+            for ch in CHANNELS_TO_CAPTURE:
+                channel_data[ch] = read_waveform(scope, ch)
+ 
+            fname = save_cycle(cycle, timestamp, channel_data)
+            print(f"[cycle {cycle}] saved -> {fname}")
+ 
+            cycle += 1
+ 
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+ 
+    finally:
+        scope.close()
+        print(f"Total cycles captured: {cycle}")
+ 
+ 
+if __name__ == "__main__":
+    main()
+ 
