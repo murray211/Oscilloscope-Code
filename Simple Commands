@@ -1,0 +1,5 @@
+scope.write(':CHAN4:DISP ON') #used to turn on or off channels
+
+import pyvisa
+rm = pyvisa.ResourceManager()
+scope = rm.open_resource('USB0::0x1AB1::0x0450::DHO5D26440025::INSTR') #How to connect to scope
