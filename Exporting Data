@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 rm = pyvisa.ResourceManager()
 
+# Code that connects python to the scope - will work for multiple diffrent computers if the scope keeps the same VISA resource address
 scope = rm.open_resource(
     'USB0::0x1AB1::0x0450::DHO5D26440025::INSTR'
 )
