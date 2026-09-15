@@ -1,0 +1,65 @@
+import pyvisa
+import numpy as np
+import matplotlib.pyplot as plt
+
+rm = pyvisa.ResourceManager()
+
+scope = rm.open_resource(
+    'USB0::0x1AB1::0x0450::DHO5D26440025::INSTR'
+)
+
+
+def get_waveform(channel):
+
+    # Select channel
+    scope.write(f':WAV:SOUR CHAN{channel}')
+    scope.write(':WAV:FORM BYTE')
+
+    # Get raw waveform
+    raw_data = scope.query_binary_values(
+        ':WAV:DATA?',
+        datatype='B',
+        container=np.array
+    )
+
+    # Get time scaling
+    x_increment = float(scope.query(':WAV:XINC?'))
+    x_origin = float(scope.query(':WAV:XOR?'))
+
+    # Get voltage scaling
+    y_increment = float(scope.query(':WAV:YINC?'))
+    y_origin = float(scope.query(':WAV:YOR?'))
+    y_reference = float(scope.query(':WAV:YREF?'))
+
+    # Convert raw data to time
+    time = x_origin + np.arange(len(raw_data)) * x_increment
+
+    # Convert raw data to voltage
+    voltage = (
+        (raw_data - y_reference) * y_increment
+        + y_origin
+    )
+
+    return time, voltage
+
+
+# Get Channel 2
+time2, voltage2 = get_waveform(2)
+
+# Get Channel 4
+time4, voltage4 = get_waveform(4)
+
+
+# Plot both
+plt.plot(time2, voltage2, label='Channel 2')
+plt.plot(time4, voltage4, label='Channel 4')
+
+plt.xlabel('Time (s)')
+plt.ylabel('Voltage (V)')
+plt.title('RIGOL DHO5104 - Channels 2 and 4')
+plt.grid()
+plt.legend()
+
+plt.show()
+
+scope.close()
