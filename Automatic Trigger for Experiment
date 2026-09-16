@@ -1,6 +1,17 @@
 import pyvisa
-rm = pyvisa.ResourceManager()
-scope = rm.open_resource('USB0::0x1AB1::0x0450::DHO5D26440025::INSTR')
+import numpy as np
+import time
+import csv
+from pathlib import Path
+from datetime import datetime
+ 
+#rm = pyvisa.ResourceManager()
+#scope = rm.open_resource('USB0::0x1AB1::0x0450::DHO5D26440025::INSTR')
+VISA_RESOURCE = 'USB0::0x1AB1::0x0450::DHO5D26440025::INSTR' # <-- update
+# Run `pyvisa.ResourceManager().list_resources()` to find the exact string,
+# or use the LAN VISA address if connected via ethernet, e.g.
+# "TCPIP0::192.168.1.50::INSTR"
+ 
 
 TRIGGER_SOURCE = "CHAN2"  #Sets the trigger to channel 2
 TRIGGER_SLOPE = "NEG"   #Sets the trigger to the falling edge
@@ -146,3 +157,4 @@ def main():
 if __name__ == "__main__":
     main()
  
+
