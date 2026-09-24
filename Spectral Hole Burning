@@ -1,1 +1,166 @@
 
+capture.py
+
+Capture CH1 (detector), CH2 (scan ramp), CH4 (trigger) from a Rigol
+DHO5104 oscilloscope for a spectral hole burning experiment.
+
+HOW TO RUN THIS IN VS CODE:
+    1. Open this whole "shb_experiment" folder in VS Code (File > Open Folder).
+    2. Open this file (capture.py).
+    3. Edit the settings block right below these instructions:
+         - set RESOURCE to your scope's VISA address (run this file once with
+           LIST_ONLY = True first to find it)
+         - set NUM_SHOTS / INTERVAL_SECONDS / OUTPUT_PREFIX as needed
+    4. Click the "Run" triangle button in the top-right of VS Code
+       (or press F5, or right-click in the editor and choose
+       "Run Python File in Terminal").
+
+No command-line flags needed — everything is controlled by the settings
+below.
+"""
+
+import csv
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np  # type: ignore[import-not-found]
+import pyvisa  # type: ignore[import-not-found]
+
+
+# --------------------------------------------------------------------------- #
+# SETTINGS — edit these, then click Run
+# --------------------------------------------------------------------------- #
+
+LIST_ONLY = False
+# ^ Leave this True first to find your scope's resource string. Once you
+#   have it, set LIST_ONLY = False and fill in RESOURCE below.
+
+RESOURCE = "USB0::0x1AB1::0x0450::DHO5D26440025::INSTR"  # e.g. "USB0::0x1AB1::0x0517::DHO5A123456789::INSTR"
+
+NUM_SHOTS = 50          # how many captures to take
+INTERVAL_SECONDS = 0.5  # pause between captures (raise this if your hole
+                         # needs longer to relax between shots)
+SINGLE_TRIGGER = True   # force a fresh trigger per shot (recommended)
+MODE = "NORM"            # "NORM" (on-screen points, fast) or "RAW" (full memory)
+OUTPUT_PREFIX = "data/hole_scan/8.192ms"  # output files land in the data/ folder
+
+# --------------------------------------------------------------------------- #
+
+CHANNELS = {"detector": 1, "scan": 2, "trigger": 4}
+
+
+def get_resource_manager():
+    """Prefer a system VISA install (NI-VISA/Rigol driver); fall back to pyvisa-py."""
+    try:
+        rm = pyvisa.ResourceManager()
+        rm.list_resources()
+        return rm
+    except Exception:
+        return pyvisa.ResourceManager("@py")
+
+
+def list_resources():
+    rm = get_resource_manager()
+    print(f"Using VISA backend: {rm}")
+    resources = rm.list_resources()
+    if not resources:
+        print("No VISA resources found. Check USB/LAN connection and drivers.")
+    for r in resources:
+        print(r)
+    return resources
+
+
+def connect(resource: str, timeout_ms: int = 15000):
+    rm = get_resource_manager()
+    inst = rm.open_resource(resource)
+    inst.timeout = timeout_ms
+    inst.chunk_size = 1024 * 1024
+    idn = inst.query("*IDN?").strip()
+    print(f"Connected: {idn}")
+    return rm, inst
+
+
+@dataclass
+class Waveform:
+    channel: int
+    time_s: np.ndarray
+    volts: np.ndarray
+
+
+def get_waveform(inst, channel: int, mode: str = "NORM") -> Waveform:
+    inst.write(f":WAV:SOURCE CHAN{channel}")
+    inst.write(f":WAV:MODE {mode}")
+    inst.write(":WAV:FORMAT BYTE")
+
+    preamble = inst.query(":WAV:PREAMBLE?").strip().split(",")
+    x_increment, x_origin, x_reference = float(preamble[4]), float(preamble[5]), float(preamble[6])
+    y_increment, y_origin, y_reference = float(preamble[7]), float(preamble[8]), float(preamble[9])
+
+    raw = inst.query_binary_values(":WAV:DATA?", datatype="B", is_big_endian=False, container=np.array)
+
+    volts = (raw.astype(np.float64) - y_origin - y_reference) * y_increment
+    n = len(volts)
+    time_s = (np.arange(n) - x_reference) * x_increment + x_origin
+    return Waveform(channel=channel, time_s=time_s, volts=volts)
+
+
+def acquire_all_channels(inst, mode: str = "NORM"):
+    return {name: get_waveform(inst, ch, mode=mode) for name, ch in CHANNELS.items()}
+
+
+def force_single_trigger(inst, poll_interval_s: float = 0.1, timeout_s: float = 20.0):
+    inst.write(":SINGLE")
+    time.sleep(0.2)
+    elapsed = 0.0
+    while elapsed < timeout_s:
+        status = inst.query(":TRIGGER:STATUS?").strip()
+        if status in ("STOP", "TD"):
+            return
+        time.sleep(poll_interval_s)
+        elapsed += poll_interval_s
+    print("Warning: timed out waiting for single trigger; capturing whatever is available.")
+
+
+def save_csv(waves: dict, out_path: Path):
+    det, scan, trig = waves["detector"], waves["scan"], waves["trigger"]
+    n = min(len(det.time_s), len(scan.time_s), len(trig.time_s))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["time_s", "detector_V", "scan_V", "trigger_V"])
+        for i in range(n):
+            writer.writerow([det.time_s[i], det.volts[i], scan.volts[i], trig.volts[i]])
+    print(f"Saved {n} points -> {out_path}")
+
+
+def main():
+    if LIST_ONLY:
+        list_resources()
+        return
+
+    if not RESOURCE:
+        print("Set RESOURCE at the top of this file first (run with LIST_ONLY = True to find it).")
+        return
+
+    rm, inst = connect(RESOURCE)
+    try:
+        if MODE == "RAW":
+            inst.write(":STOP")
+            time.sleep(0.2)
+
+        for i in range(NUM_SHOTS):
+            if SINGLE_TRIGGER:
+                force_single_trigger(inst)
+            waves = acquire_all_channels(inst, mode=MODE)
+            suffix = f"_{i:04d}" if NUM_SHOTS > 1 else ""
+            save_csv(waves, Path(f"{OUTPUT_PREFIX}{suffix}.csv"))
+            if NUM_SHOTS > 1 and INTERVAL_SECONDS > 0 and i < NUM_SHOTS - 1:
+                time.sleep(INTERVAL_SECONDS)
+    finally:
+        inst.close()
+        rm.close()
+
+
+if __name__ == "__main__":
+    main()
