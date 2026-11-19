@@ -7,10 +7,12 @@ import numpy as np
 import pyvisa
 import matplotlib.pyplot as plt
 
-CHANNELS = [1, 2]
-CHUNK = 250_000  # max points per :WAV:DATA? read in BYTE format
-DOWNLOADS = Path.home() / "Downloads" / "QCORE Research" / "Experiment Data"
+# ---- USER SETTING: channels to capture (any of 1, 2, 3, 4) ----
+# Examples: [1, 2]   [1]   [2, 3]   [1, 2, 3, 4]
+CHANNELS = [1, 2, 4]
 
+CHUNK = 250_000  # max points per :WAV:DATA? read in BYTE format
+DOWNLOADS = Path.home() / "Downloads" 
 
 def resolve_output(name):
     """Put a bare filename in Downloads; leave full/relative paths with folders alone."""
@@ -122,7 +124,7 @@ def main():
     print("Saved", csv_path)
 
     # ---- Plot: one stacked subplot per channel, shared time axis ----
-    colors = {1: "gold", 2: "deepskyblue"}
+    colors = {1: "gold", 2: "deepskyblue", 3: "magenta", 4: "limegreen"}
     fig, axes = plt.subplots(len(results), 1, sharex=True,
                              figsize=(11, 2.2 * len(results) + 1))
     axes = np.atleast_1d(axes)
@@ -144,3 +146,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
