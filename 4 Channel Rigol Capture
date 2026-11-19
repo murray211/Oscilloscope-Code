@@ -1,0 +1,146 @@
+Capture up to 4 channels from a Rigol oscilloscope (DS1000Z / MSO5000 style
+SCPI command set) and plot them.
+
+Install:  pip install pyvisa pyvisa-py numpy matplotlib
+          (also pip install pyusb if connecting over USB with pyvisa-py,
+           or install NI-VISA instead of pyvisa-py)
+
+Usage:
+    python rigol_capture.py                       # auto-detect first Rigol
+    python rigol_capture.py --resource "TCPIP0::192.168.1.50::INSTR"
+    python rigol_capture.py --mode NORM           # quick, ~1200 points
+    python rigol_capture.py --csv capture.csv --png capture.png
+"""
+
+import argparse
+import sys
+
+import numpy as np
+import pyvisa
+import matplotlib.pyplot as plt
+
+CHANNELS = [1, 2, 3, 4]
+CHUNK = 250_000  # max points per :WAV:DATA? read in BYTE format
+
+
+def find_rigol(rm):
+    """Return the first VISA resource that identifies as Rigol."""
+    for res in rm.list_resources():
+        try:
+            inst = rm.open_resource(res, timeout=3000)
+            idn = inst.query("*IDN?")
+            inst.close()
+            if "RIGOL" in idn.upper():
+                print(f"Found: {idn.strip()}  @ {res}")
+                return res
+        except Exception:
+            continue
+    return None
+
+
+def read_channel(scope, ch, mode):
+    """Read one channel and return (time_array, voltage_array)."""
+    scope.write(f":WAV:SOUR CHAN{ch}")
+    scope.write(f":WAV:MODE {mode}")
+    scope.write(":WAV:FORM BYTE")
+
+    # Preamble: format,type,points,count,xinc,xorigin,xref,yinc,yorigin,yref
+    pre = scope.query(":WAV:PRE?").strip().split(",")
+    n_points = int(float(pre[2]))
+    xinc, xorg, xref = float(pre[4]), float(pre[5]), float(pre[6])
+    yinc, yorg, yref = float(pre[7]), float(pre[8]), float(pre[9])
+
+    raw = []
+    start = 1
+    while start <= n_points:
+        stop = min(start + CHUNK - 1, n_points)
+        scope.write(f":WAV:STAR {start}")
+        scope.write(f":WAV:STOP {stop}")
+        data = scope.query_binary_values(
+            ":WAV:DATA?", datatype="B", container=np.array
+        )
+        raw.append(data)
+        start = stop + 1
+
+    raw = np.concatenate(raw).astype(np.float64)
+    volts = (raw - yorg - yref) * yinc
+    time = (np.arange(len(raw)) - xref) * xinc + xorg
+    return time, volts
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Capture 4 channels from a Rigol scope")
+    ap.add_argument("--resource", help="VISA resource string (default: auto-detect)")
+    ap.add_argument("--mode", choices=["NORM", "RAW"], default="RAW",
+                    help="NORM = screen data (~1200 pts), RAW = full memory (scope is stopped)")
+    ap.add_argument("--csv", help="Save data to this CSV file")
+    ap.add_argument("--png", help="Save the plot to this image file")
+    ap.add_argument("--no-show", action="store_true", help="Don't open the plot window")
+    args = ap.parse_args()
+
+    rm = pyvisa.ResourceManager()  # add "@py" for pyvisa-py: pyvisa.ResourceManager("@py")
+    resource = args.resource or find_rigol(rm)
+    if not resource:
+        sys.exit("No Rigol scope found. Pass --resource explicitly "
+                 "(e.g. TCPIP0::192.168.1.50::INSTR or USB0::0x1AB1::...::INSTR).")
+
+    scope = rm.open_resource(resource)
+    scope.timeout = 20_000
+    scope.chunk_size = 1024 * 1024
+    scope.read_termination = "\n"
+    scope.write_termination = "\n"
+
+    print("Connected to:", scope.query("*IDN?").strip())
+
+    # RAW mode only works when the scope is stopped
+    if args.mode == "RAW":
+        scope.write(":STOP")
+
+    results = {}
+    for ch in CHANNELS:
+        if scope.query(f":CHAN{ch}:DISP?").strip() not in ("1", "ON"):
+            print(f"CH{ch}: display off, skipping")
+            continue
+        print(f"CH{ch}: reading...", end=" ", flush=True)
+        t, v = read_channel(scope, ch, args.mode)
+        results[ch] = (t, v)
+        print(f"{len(v)} points")
+
+    if args.mode == "RAW":
+        scope.write(":RUN")
+    scope.close()
+
+    if not results:
+        sys.exit("No channels were enabled on the scope.")
+
+    # ---- Save CSV (channels share the same timebase) ----
+    if args.csv:
+        first = next(iter(results.values()))[0]
+        cols = [first] + [results[ch][1] for ch in results]
+        header = "time_s," + ",".join(f"CH{ch}_V" for ch in results)
+        np.savetxt(args.csv, np.column_stack(cols), delimiter=",",
+                   header=header, comments="")
+        print("Saved", args.csv)
+
+    # ---- Plot: one stacked subplot per channel, shared time axis ----
+    colors = {1: "gold", 2: "deepskyblue", 3: "magenta", 4: "limegreen"}
+    fig, axes = plt.subplots(len(results), 1, sharex=True,
+                             figsize=(11, 2.2 * len(results) + 1))
+    axes = np.atleast_1d(axes)
+    for ax, (ch, (t, v)) in zip(axes, results.items()):
+        ax.plot(t, v, color=colors[ch], linewidth=0.8)
+        ax.set_ylabel(f"CH{ch} (V)")
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle("Rigol Oscilloscope Capture")
+    fig.tight_layout()
+
+    if args.png:
+        fig.savefig(args.png, dpi=150)
+        print("Saved", args.png)
+    if not args.no_show:
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
